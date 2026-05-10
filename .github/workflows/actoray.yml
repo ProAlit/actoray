@@ -1,0 +1,115 @@
+name: actoray
+
+on:
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  expose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # 6 hours max
+    steps:
+      - name: Checkout (optional)
+        uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          XRAY_VERSION="v26.3.27"
+          DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          TMPDIR=$(mktemp -d)
+          curl -sL "$DOWNLOAD_URL" -o "$TMPDIR/xray.zip"
+          unzip -q "$TMPDIR/xray.zip" -d "$TMPDIR"
+          sudo install -m 755 "$TMPDIR/xray" /usr/local/bin/xray
+          rm -rf "$TMPDIR"
+
+      - name: Create
+        run: |
+          sudo mkdir -p /etc/xray
+          cat << 'EOF' | sudo tee /etc/xray/actoray.json
+          {
+            "log": {
+              "loglevel": "warning"
+            },
+            "inbounds": [
+              {
+                "tag": "vless-in",
+                "port": 443,
+                "protocol": "vless",
+                "settings": {
+                  "clients": [
+                    {
+                      "id": "2166797c-f912-4a24-a467-c5d0c216cc2d",
+                      "flow": ""
+                    }
+                  ],
+                  "decryption": "none"
+                },
+                "streamSettings": {
+                  "network": "xhttp",
+                  "xhttpSettings": {
+                    "mode": "packet-up",
+                    "path": "/"
+                  }
+                }
+              }
+            ],
+            "outbounds": [
+              {
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": {}
+              }
+            ]
+          }
+          EOF
+
+      - name: Start
+        run: |
+          sudo /usr/local/bin/xray run -c /etc/xray/actoray.json &
+          sleep 2
+
+      - name: Install
+        run: |
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/
+
+      - name: Create
+        run: |
+          # Start tunnel, capture all output
+          cloudflared tunnel --url http://localhost:443 > cloudflared.log 2>&1 &
+
+          # Wait up to 60 seconds for the trycloudflare URL to appear
+          for i in {1..60}; do
+            if grep -q "https://.*\.trycloudflare\.com" cloudflared.log; then
+              break
+            fi
+            sleep 1
+          done
+
+          # Extract the domain part (strip https://)
+          TUNNEL_URL=$(grep -o "https://[a-zA-Z0-9.-]*\.trycloudflare\.com" cloudflared.log | head -1)
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "::error::Failed to obtain TryCloudflare URL"
+            cat cloudflared.log
+            exit 1
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          echo "::notice::TryCloudflare URL: $TUNNEL_URL"
+
+      - name: Print
+        run: |
+          # Remove https:// prefix to get bare hostname
+          HOSTNAME="${TUNNEL_URL#https://}"
+          echo ""
+          echo "=============================================="
+          echo "  actoray"
+          echo "=============================================="
+          echo ""
+          echo "vless://2166797c-f912-4a24-a467-c5d0c216cc2d@${HOSTNAME}:443?encryption=none&security=tls&type=xhttp&mode=packet-up&sni=${HOSTNAME}&path=%2F#actoray"
+          echo ""
+          echo "=============================================="
+
+      - name: Keep
+        run: |
+          sleep 21000
